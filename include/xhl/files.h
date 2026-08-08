@@ -196,8 +196,10 @@ bool xfiles_create_directory(const char* path);
 bool xfiles_create_directory_recursive(const char* path);
 
 // Returns only true on success and sets 'out' and 'outlen' with file contents and size
-// Must release 'out' with free()
+// Must release 'out' with xfiles_read_free()
 bool xfiles_read(const char* path, void** out, size_t* outlen);
+// Frees a file's contents allocated with xfiles_read()
+void xfiles_read_free(void *data);
 // Creates file if it doesn't exist with default access permissions.
 // If file already exists, it overwrites all contents.
 bool xfiles_write(const char* path, const void* in, size_t inlen);
@@ -1718,6 +1720,11 @@ int xfiles_get_user_directory(char* out, size_t outlen, XFilesUserDirectory loc)
 
 #endif // __OBJC__
 #endif // __APPLE__
+
+void xfiles_read_free(void *data)
+{
+    XFILES_FREE(data);
+}
 
 const char* xfiles_get_name(const char* path)
 {
