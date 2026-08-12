@@ -196,10 +196,10 @@ bool xfiles_create_directory(const char* path);
 bool xfiles_create_directory_recursive(const char* path);
 
 // Returns only true on success and sets 'out' and 'outlen' with file contents and size
-// Must release 'out' with xfiles_read_free()
+// Must release 'out' with xfiles_free()
 bool xfiles_read(const char* path, void** out, size_t* outlen);
 // Frees a file's contents allocated with xfiles_read()
-void xfiles_read_free(void *data);
+void xfiles_free(void* data);
 // Creates file if it doesn't exist with default access permissions.
 // If file already exists, it overwrites all contents.
 bool xfiles_write(const char* path, const void* in, size_t inlen);
@@ -452,7 +452,7 @@ bool xfiles_read(const char* path, void** out, size_t* outlen)
                 }
                 else
                 {
-                    XFILES_FREE(data);
+                    xfiles_free(data);
                     data              = NULL;
                     FileSize.QuadPart = 0;
                 }
@@ -1107,7 +1107,7 @@ bool xfiles_read(const char* path, void** out, size_t* outlen)
             XFILES_ASSERT(nread != -1);
             if (nread == -1)
             {
-                XFILES_FREE(data);
+                xfiles_free(data);
                 data = NULL;
             }
             else
@@ -1628,11 +1628,11 @@ void xfiles_watch_destroy(void* _ctx_nb)
     XFILES_ASSERT(nevents == nfolders);
     for (int i = nevents; i-- > 0;)
         _xfiles_watch_remove_listener_at_index(ctx, i);
-    XFILES_FREE(ctx->changelist);
-    XFILES_FREE(ctx->handles);
-    XFILES_FREE(ctx->stringpool);
+    xfiles_free(ctx->changelist);
+    xfiles_free(ctx->handles);
+    xfiles_free(ctx->stringpool);
 
-    XFILES_FREE(ctx);
+    xfiles_free(ctx);
 }
 
 #ifdef __OBJC__
@@ -1721,10 +1721,7 @@ int xfiles_get_user_directory(char* out, size_t outlen, XFilesUserDirectory loc)
 #endif // __OBJC__
 #endif // __APPLE__
 
-void xfiles_read_free(void *data)
-{
-    XFILES_FREE(data);
-}
+void xfiles_free(void* data) { XFILES_FREE(data); }
 
 const char* xfiles_get_name(const char* path)
 {
