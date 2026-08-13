@@ -653,7 +653,7 @@ bool xfiles_select_in_file_explorer(const char* path)
             ILFree(pItemList);
             CoUninitialize();
 
-            return hres = S_OK;
+            return hres == S_OK;
         }
     }
     return false;
