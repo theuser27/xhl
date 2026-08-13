@@ -80,6 +80,9 @@ void cb_onfilechange(enum XFILES_WATCH_TYPE type, const char* path, void* udata)
         // 'modified' callbacks. If you're hoping to recompile code, you may want to write your own throttle for
         // whatever actions you make in response
         break;
+    case XFILES_WATCH_OVERFLOW:
+        fprintf(stderr, "Oh dear, we are under heavy load and poor old Windows can't cope. Please resync\n");
+        break;
     }
 }
 
@@ -315,11 +318,22 @@ typedef void(xfiles_list_callback_t)(void* data, const xfiles_list_item_t* item)
 // Calls the above callback for each item in a directory
 void xfiles_list(const char* path, void* data, xfiles_list_callback_t* cb);
 
+// NOTE: macOS (freebsd) doesn't have a reliable "file/folder renamed" event. The best you can do on macOS is detect a
+// deletion, later followed by a creation. Unfortunately, per design of their APIs, you cannot depend on these events
+// being contiguous. Plan for this in your apps. Windows reports renames explicitly, but they're translated into the
+// same deleted+created pair here for consistency - don't depend on ordering there either.
 enum XFILES_WATCH_TYPE
 {
     XFILES_WATCH_CREATED,
     XFILES_WATCH_DELETED,
+    // File path stays the same, contents or metadata was modified in some way
     XFILES_WATCH_MODIFIED,
+    // Due to limitations in Windows APIs, it's theoretically possible to lose file change events if the event stream
+    // exceeds 64kb. Their docs say in this case, a full directory rescan is required. We don't do rescans in this watch
+    // API, so we hot potato the responsibility onto you if your app really needs it. We use a 64kb buffer so it's
+    // unlikely apps will ever exceed the cap in the real world.
+    // On macOS this is never called
+    XFILES_WATCH_OVERFLOW,
 };
 typedef void (*xfiles_watch_callback_t)(enum XFILES_WATCH_TYPE type, const char* path, void* udata);
 typedef void* xfiles_watch_context_t;
@@ -893,7 +907,9 @@ typedef struct XFWatchContext
     // https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-overlapped
     OVERLAPPED overlapped;
 
-    BYTE buffer[1024 * 4];
+    // 64KB is max size ReadDirectoryChangesW supports. This only reduces the likelihood of loosing file events. By
+    // design it cannot be prevented on Windows (to my knowledge)
+    BYTE buffer[1024 * 64];
 
     int  pathlen;
     char path[MAX_PATH];
@@ -990,40 +1006,51 @@ void xfiles_watch_flush(xfiles_watch_context_t _ctx)
         BOOL bWait   = FALSE;
         BOOL success = GetOverlappedResult(ctx->hDirectory, &ctx->overlapped, &dwNumberOfBytesTransferred, bWait);
 
-        while (success && dwOffset < dwNumberOfBytesTransferred)
+        // !success is how we detect we hit the buffer cap.
+        // Windows docs tell us to do a full directory rescan when we do that
+        // dwNumberOfBytesTransferred == 0 will probably never be hit, but it's a signal Windows may be acting up due to
+        // "result == WAIT_OBJECT_0" above, which means we are expecting to recieve data.
+        if (!success || dwNumberOfBytesTransferred == 0)
         {
-            FILE_NOTIFY_INFORMATION* pNotify = (FILE_NOTIFY_INFORMATION*)(ctx->buffer + dwOffset);
-
-            enum XFILES_WATCH_TYPE type = ((enum XFILES_WATCH_TYPE)0xffffffff); // invalid
-            if (pNotify->Action == FILE_ACTION_ADDED)
-                type = XFILES_WATCH_CREATED;
-            if (pNotify->Action == FILE_ACTION_REMOVED)
-                type = XFILES_WATCH_DELETED;
-            if (pNotify->Action == FILE_ACTION_MODIFIED)
-                type = XFILES_WATCH_MODIFIED;
-
-            if (type >= 0)
+            ctx->callback(XFILES_WATCH_OVERFLOW, ctx->path, ctx->udata);
+        }
+        else
+        {
+            while (dwOffset < dwNumberOfBytesTransferred)
             {
-                char fp[MAX_PATH] = {0};
-                int  NameLength   = pNotify->FileNameLength / sizeof(wchar_t);
+                FILE_NOTIFY_INFORMATION* pNotify = (FILE_NOTIFY_INFORMATION*)(ctx->buffer + dwOffset);
 
-                int fplen  = snprintf(fp, sizeof(fp), "%.*s" XFILES_DIR_STR, ctx->pathlen, ctx->path);
-                fplen     += WideCharToMultiByte(
-                    CP_UTF8,
-                    WC_ERR_INVALID_CHARS,
-                    pNotify->FileName,
-                    NameLength,
-                    fp + fplen,
-                    sizeof(fp) - fplen,
-                    NULL,
-                    NULL);
+                enum XFILES_WATCH_TYPE type = ((enum XFILES_WATCH_TYPE)0xffffffff); // invalid
+                if (pNotify->Action == FILE_ACTION_ADDED || pNotify->Action == FILE_ACTION_RENAMED_NEW_NAME)
+                    type = XFILES_WATCH_CREATED;
+                if (pNotify->Action == FILE_ACTION_REMOVED || pNotify->Action == FILE_ACTION_RENAMED_OLD_NAME)
+                    type = XFILES_WATCH_DELETED;
+                if (pNotify->Action == FILE_ACTION_MODIFIED)
+                    type = XFILES_WATCH_MODIFIED;
 
-                ctx->callback(type, fp, ctx->udata);
+                if (type >= 0)
+                {
+                    char fp[MAX_PATH] = {0};
+                    int  NameLength   = pNotify->FileNameLength / sizeof(wchar_t);
+
+                    int fplen  = snprintf(fp, sizeof(fp), "%.*s" XFILES_DIR_STR, ctx->pathlen, ctx->path);
+                    fplen     += WideCharToMultiByte(
+                        CP_UTF8,
+                        WC_ERR_INVALID_CHARS,
+                        pNotify->FileName,
+                        NameLength,
+                        fp + fplen,
+                        sizeof(fp) - fplen,
+                        NULL,
+                        NULL);
+
+                    ctx->callback(type, fp, ctx->udata);
+                }
+
+                dwOffset += pNotify->NextEntryOffset;
+                if (pNotify->NextEntryOffset == 0)
+                    break;
             }
-
-            dwOffset += pNotify->NextEntryOffset;
-            if (pNotify->NextEntryOffset == 0)
-                break;
         }
 
         // After events are flushed we need to call ReadDirectoryChangesW() to prepare our event queue again
